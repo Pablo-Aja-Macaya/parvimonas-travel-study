@@ -128,7 +128,7 @@ dmypy.json
 .pyre/
 
 # TSV and tiff
-*.tsv
+#*.tsv
 *.tiff
 *.html
 #*.zip

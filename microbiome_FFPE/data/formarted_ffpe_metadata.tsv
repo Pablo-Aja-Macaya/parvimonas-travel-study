@@ -1,0 +1,34 @@
+SampleID	id_tissue	subject_type	subject	CCRbiome	location_en	histologic_grade_en	tnm_staging	sample_nature	sequencing_run	control_applies_to
+#q2:types	categorical	categorical	categorical	numeric	categorical	categorical	categorical	categorical	categorical	categorical
+CCR-89-1-FFPE-Normal-c	Normal-colon	CCR89	ccr	89	right-colon		pt3n0	ffpe	v2ccrfpi17062022	
+CCR-89-1-FFPE-Normal	Normal-colon	CCR89	ccr	89	right-colon		pt3n0	ffpe	v2smurf10092021	
+CCR-89-1-FFPE-Tumor-c	Tumor	CCR89	ccr	89	right-colon	low-grade	pt3n0	ffpe	v2ccrfpi17062022	
+CCR-89-1-FFPE-Tumor	Tumor	CCR89	ccr	89	right-colon	low-grade	pt3n0	ffpe	v2smurf10092021	
+CCR_FFPE_89_1_adenoma_3g	Adenoma	CCR89	ccr	89	right-colon		pt3n0	ffpe	v2ccrfpi17062022	
+CCR-FFPE-89-1-adenoma-3	Adenoma	CCR89	ccr	89	right-colon		pt3n0	ffpe	v2smurf15122021	
+CCR-89-1-FFPE-Tumor-a	Tumor	CCR89	ccr	89	right-colon	low-grade	pt3n0	ffpe	v2ccrfpi17062022	
+CCR-89-1-FFPE-Normal-b	Normal-colon	CCR89	ccr	89	right-colon		pt3n0	ffpe	v2ccrfpi17062022	
+CCR-FFPE-89-1-adenoma-3-c	Adenoma	CCR89	ccr	89	right-colon		pt3n0	ffpe	v2ccrfpi17062022	
+CCR-FFPE-89-1-adenoma-2-d_	Adenoma	CCR89	ccr	89	right-colon		pt3n0	ffpe	v2ccrfpi17062022	
+CCR-FFPE-89-1-adenoma-1-e	Adenoma	CCR89	ccr	89	right-colon		pt3n0	ffpe	v2ccrfpi17062022	
+CCR-FFPE-89-1-tumor-2-f	Tumor	CCR89	ccr	89	right-colon	low-grade	pt3n0	ffpe	v2ccrfpi17062022	
+CCR_FFPE_89_1_adenoma_2	Adenoma	CCR89	ccr	89	right-colon		pt3n0	ffpe	v2smurf15122021	
+CCR_FFPE_89_1_adenoma_1	Adenoma	CCR89	ccr	89	right-colon		pt3n0	ffpe	v2smurf15122021	
+CCR_FFPE_89_1_tumor_2	Tumor	CCR89	ccr	89	right-colon		pt3n0	ffpe	v2smurf15122021	
+controlffpe13-1-062022	Control	control	control		control			control	v2ccrfpi17062022	all
+controlffpe13-2-062022	Control	control	control		control			control	v2ccrfpi17062022	all
+Control_neg_Extraccion1	Control	control	control		control			control	v2smurf08102021	all
+Control_neg_FFPE_PCR1	Control	control	control		control			control	v2smurf11062021	all
+Control_neg_FFPE_PCR2	Control	control	control		control			control	v2smurf11062021	all
+Control_neg_FFPE_PCR3	Control	control	control		control			control	v2smurf11062021	all
+Control_neg_FFPE_PCR4	Control	control	control		control			control	v2smurf11062021	all
+Control_neg_FFPE_PCR5	Control	control	control		control			control	v2smurf15122021	all
+Control_neg_Parafina1	Control	control	control		control			control	v2smurf08102021	all
+Control_neg_Parafina2	Control	control	control		control			control	v2smurf08102021	all
+Control_neg_Parafina3	Control	control	control		control			control	v2smurf08102021	all
+Control_neg_Parafina4	Control	control	control		control			control	v2smurf08102021	all
+cneg_parafina5	Control	control	control		control			control	v2smurf15122021	all
+cneg_parafina6	Control	control	control		control			control	v2smurf15122021	all
+cneg_parafina7	Control	control	control		control			control	v2smurf15122021	all
+cneg_parafina8	Control	control	control		control			control	v2smurf15122021	all
+cneg_parafina9	Control	control	control		control			control	v2smurf15122021	all
