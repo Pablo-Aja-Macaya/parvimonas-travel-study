@@ -3,7 +3,7 @@
 - [Requirements](#requirements)
 - [Download reads and metadata](#download-reads-and-metadata)
 - [QIIME2 processing](#qiime2-processing)
-    -[Sidle tool](#sidle-tool)
+    - [Sidle tool](#sidle-tool)
 - [Post-processing](#post-processing)
     - [Relative abundance in patient 89](#relative-abundance-in-patient-89)
     - [R Libraries Installation Instructions](#r-libraries-installation-instructions)
@@ -59,8 +59,9 @@ As for the columns subject_type is the subject classification (ccr or control), 
 Finally,the columns sample_nature, control_id_seq_run and control_applies_to are related to sample classification (ffpe or control), to sequencing run code and negative control identification ("control-applies-to*" will be used to remove contamination of specific samples/tissues in their respective sequencing runs), respectively.
 
 ## QIIME2 processing
+
 ### Sidle tool
-Paraffined samples has been analyzed with SMURF (Short MUltiple Regions Framework) python implementation in QIIME2 Framework, called q2-sidle. This software combines sequencing results of any number of amplified 16S rRNA regions to obtain a reliable microbial profiling. [To know more, go to]:(https://q2-sidle.readthedocs.io/en/latest/index.html).
+Paraffined samples has been analyzed with SMURF (Short MUltiple Regions Framework) python implementation in QIIME2 Framework, called q2-sidle. This software combines sequencing results of any number of amplified 16S rRNA regions to obtain a reliable microbial profiling. [To know more, go to](https://q2-sidle.readthedocs.io/en/latest/index.html).
 
 A bash script is located at `microbiome_FFPE/qiime2/<insert-bash-script-name>.sh`.    
     
