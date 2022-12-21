@@ -30,7 +30,7 @@ wget https://data.qiime2.org/distro/core/qiime2-2021.4-py38-linux-conda.yml
 conda env create -n qiime2-2021.4 --file qiime2-2021.4-py38-linux-conda.yml
 rm qiime2-2021.4-py38-linux-conda.yml # OPTIONAL CLEANUP
 ```
-[In case of complications with conda or qiime2 version installation, go to]:(https://docs.qiime2.org/2021.4/install/native/)
+[In case of complications with conda or qiime2 version installation, go to](https://docs.qiime2.org/2021.4/install/native/)
 
 ### Install Sidle
 Sidle can be installed after activate your conda environment as explained previously.
@@ -66,6 +66,7 @@ A bash script is located at `microbiome_FFPE/qiime2/<insert-bash-script-name>.sh
     
 ### Output Files: 
 When it is done multiple outputs will be available, which will be the ones used in:
+
 [Sidle tool](#sidle-tool)
 - `regional-databases`:
     - `silva-silvaversion-Rx-trimmedlength.qza`
@@ -102,7 +103,7 @@ It is optional to export results to biom or tsv format. In this case, we used a 
     
 ## Post-processing
 ### Relative abundance in patient 89
-A rmarkdown, located at, can be executed to obtain the data results shows in the html, available at `microbiome_non-FFPE/post-processing/CCR89_FFPE_Replicates.Rmd`. 
+A rmarkdown, located at `microbiome_non-FFPE/post-processing/CCR89_FFPE_Replicates.Rmd`, can be executed to obtain the data results shows in html format.
 We have used Rstudio to run R scripts, but there are another environments used, as mamba.(See Readme available at `microbiome_non-FFPE/README.rmd`). 
 Note: For results replication purpose, the metadata used in the rmarkdown file should be the one called metadataccr89_FFPE.tsv. This one is a simplification of the metadata called ffpe_metadata.tsv (both of them are located at: `microbiome_FFPE/data/`)
 
