@@ -1,0 +1,774 @@
+---
+title: "Patient 89 analysis (non-FFPE)"
+output:
+  html_document:
+    highlight: 'haddock'
+    theme: cerulean
+    df_print: paged
+    number_sections: true
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+    cache       = FALSE,     # if TRUE knitr will cache the results to reuse in future knits
+    # fig.width   = 18,       # the width for plots created by code chunk
+    # fig.height  = 8,       # the height for plots created by code chunk
+    fig.align   = 'center', # how to align graphics in the final doc. 
+    warning     = FALSE,
+    cache       = FALSE,
+    comment     = NA
+)
+# knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+```
+
+In this script we will analyze relative abundance of organisms in non-paraffinated samples from patient 89 (subject: ccr89), the main target of the presented study. The script will read various inputs, create a phyloseq object, perform cleaning on this object (using negative controls and some described contaminants in literature) and create barplots for relative abundance in each type of sample.
+
+
+# Libraries
+
+Load the neccessary libraries:
+
+```{r message=FALSE, warning=FALSE}
+library(purrr)
+library(ggplot2)
+library(dplyr)
+library(vegan)
+library("devtools")
+library(data.table)
+library(ggtree)
+library(phyloseq)
+library(plotly)
+library(VennDiagram)
+require(RColorBrewer)
+library(egg)
+library(randomcoloR)
+library(glue)
+library(ANCOMBC)
+library(DT)
+options(dplyr.summarise.inform = FALSE)
+```
+
+# Visual functions
+
+Load a function to show pretty tables in HTML format:
+
+```{r}
+create.table <- function(df, capt=NULL){
+  DT::datatable(df, extensions = c('FixedColumns'),
+                options = list(scrollX = TRUE, pageLength = 5), 
+                caption=htmltools::tags$caption(
+                  style = 'caption-side: bottom; text-align: center; color: black;',
+                  htmltools::em(capt)
+                ))
+}
+```
+
+# Input
+
+The neccessary input for the script is specified here:
+
+```{r}
+feature_table_file <- "/home/usuario/Proyectos/Results/Kelly/KellyBiome/parvimonas89/table-nanov3v4CCR89_julio22SiFilt/71f260d3-43da-4255-8d6a-0085310fa67c/data/feature-table.json.biom"
+contamination_file <- "/home/usuario/Proyectos/ParviPaper/microbiome_non-FFPE/data/contaminants.tsv"
+metadata_file <- "/home/usuario/Proyectos/ParviPaper/microbiome_non-FFPE/data/non-ffpe_metadata.tsv"
+taxmat_file <- "/home/usuario/Proyectos/Results/Kelly/KellyBiome/parvimonas89/taxonomy-silva138-99nb-nanov3v4CCR89_julio22SiFilt/95df1767-4244-4c5e-9ae9-7de835726e5a/data/separated_taxonomy.tsv"
+output_folder <- "/home/usuario/Proyectos/Results/Kelly/KellyCCR/output/phyloseq/proportions"
+variables_of_interest <- c("sample.type","origin")
+timeline_var <- ""
+```
+
+# Load data
+
+There are three parts that must be loaded for a phyloseq object, the features (ASV), metadata and taxonomy information.
+
+## Features
+
+Load ASVs and remove those which are empty (bad quality or a control):
+```{r}
+# ---- ASVs -----
+# Transform biome data to JSON.biome
+# biom convert -i in.biom -o out.json.biom --table-type="OTU table" --to-json
+otu_df <- import_biom(feature_table_file)
+
+# Eliminar muestras donde toda la columna sea 0 (no tienen datos)
+condition <- colSums(otu_df) != 0
+otu_df_empty_cols <- colnames(otu_df)[!condition]
+if (length(otu_df_empty_cols)>0){
+  print(glue("WARNING: There are {length(otu_df_empty_cols)} empty columns in ASV dataframe (no data, this can happen in controls) and they will be removed: '{paste(otu_df_empty_cols, collapse='; ')}'"))
+}
+otu_df <- otu_df[, condition]
+
+create.table(head(otu_df), "Head of feature table")
+
+```
+
+## Metadata
+
+Metadata is processed here:
+
+```{r}
+# ---- Metadata ----
+metadata <- read.delim(metadata_file, comment.char = "#")
+
+# Check if there are columns not in otu_df besides the otu_df columns that were empty
+condition <- metadata[,'sample.id'] %in% colnames(otu_df)
+sample.ids.not.in.otus <- metadata[!condition,]$sample.id
+if (length(setdiff(otu_df_empty_cols, sample.ids.not.in.otus))>0){
+  warning("There are unexpected columns in metadata that do not exist in ASV dataframe")
+}
+metadata <- metadata[condition,] # eliminar muestras si no existen en otu_df
+rownames(metadata) <- metadata[,'sample.id']
+
+# Create column for grouping by variables_of_interest
+if ("grouping_var" %in% names(metadata)){
+  stop("Ups, metadata already has grouping_var as column")
+} else {
+  metadata$grouping_var <- do.call(paste, c(metadata[variables_of_interest], sep="__"))
+}
+
+# Make categorical columns
+for (i in variables_of_interest){
+  metadata[[i]] <- factor(metadata[[i]])
+}
+
+create.table(metadata, "Metadata")
+
+```
+
+## Taxonomy
+
+The taxonomy is processed here to propagate levels (filling NAs in taxa levels with the last known level):
+
+```{r}
+# ---- Taxmat ----
+# Taxonomy must be split into columns
+taxmat = as.matrix(read.delim(taxmat_file, sep='\t'))
+
+# Propagate NAs
+keep_unidentified <- function(tx_table){
+  # Keep the ones that have one of c(NA, "", " ", "\t") in target_level column
+  # and then find the last level that is known (can be Genus, Family...)
+  # Assign to the target_level level the last known level + x__XXX NA
+  # Family (last known)   Species
+  # f__Lachnospiraceae    f__Lachnospiraceae NA
+  elements_to_target <- colnames(tx_table)
+  tx_table <- as.data.frame(tx_table)
+  previous_level <- elements_to_target[1]
+  for (level in elements_to_target[2:length(elements_to_target)]){
+    empty_values <- tx_table[[level]] %in% c(NA, "", " ", "\t")
+    tx_table[[level]][empty_values] <- paste(tx_table[[previous_level]][empty_values], "NA", sep="_")
+    tx_table[[level]][empty_values] <- gsub("(_NA[> ]*)*", "\\1", tx_table[[level]][empty_values]) # Replace repetitions of NA by one NA
+    
+    previous_level <- level
+  }
+  
+  return(tx_table)
+}
+taxmat <- as.matrix(keep_unidentified(taxmat))
+
+# Set row names
+rownames(taxmat) <- rownames(otu_df)
+
+create.table(as.data.frame(head(taxmat)), "Head of taxonomy table")
+```
+
+
+# Apply controls
+
+Substract controls specified in metadata, in order to reduce possible PCR contaminations:
+
+```{r}
+# Calcular la suma de cada ASV en los controles
+sum_rows <- function(input){
+  # Si el input es dataframe hacer rowSums para obtener un vector
+  # Si ya es un vector devolverlo
+  if (is.null(ncol(input))){
+    return (input)
+  } else {
+    return (rowSums(input))
+  }
+}
+
+substract_control <- function(features, metadata, importance_multiplier=1){
+  # Substract ASVs that appear in controls per sequencing-run
+  # - features: ASV table
+  # - metadata: dataframe with metadata
+  # - importance_multiplier: increase this to a big number to fully remove ASVs that appear in controls (like 999999)
+  cat("\nUsing controls for cleaning...\n")
+  
+  # Initialize clean dataframe with non-control ids
+  clean.otu.df <- features[, subset(metadata, sample.type!="control")$sample.id]
+  
+  # Split "control.applies.to.origin" column by ";"
+  # The resulting elements will be searched in "origin" column 
+  # and the control will be applied to corresponding samples
+  metadata$control.applies.to_split <- strsplit(metadata$control.applies.to.origin, ";")
+  
+  # For each control ID
+  for (control_id in subset(metadata, sample.type=="control")$sample.id ){
+    # Get the metadata of the control ID
+    r <- subset(metadata, sample.id==control_id)
+    
+    # Log
+    control_id_seq_run = r$sequencing.run
+    print(glue("\n==== Using sample.id '{control_id}' as control in sequencing.run='{control_id_seq_run}' ===="))
+    
+    # Check that if element "all" is present no other elements exist
+    # and that an element is not repeated with unique
+    applies_to_elements <- unique(r$control.applies.to_split[[1]]) # To access split elements: metadata$control.applies.to_split[65][[1]][1]
+    if ("all" %in% applies_to_elements & length(applies_to_elements)>1){
+      stop("Element 'all' was specified, but extra elements are present. Please choose either 'all' or the other elements")
+    }
+    
+    # For each origin to which the control applies to
+    for (applies_to in applies_to_elements){ 
+      print(glue("\n~~~ Applying control to: '{applies_to}' ~~~"))
+      
+      tmp <- subset(metadata, sample.type!="control" & sequencing.run==control_id_seq_run)
+      
+      # If the control applies to all samples
+      if (applies_to == "all"){
+        tmp <- tmp
+        # If it only applies to a certain origin type which IS in metadata$origin
+      } else if (applies_to %in% metadata$origin){
+        tmp <- subset(tmp, origin==applies_to)
+        # If it is not "all" or the element doesnt exist in metadata$origin, raise error 
+      } else {
+        warning(glue("Origin '{applies_to}' is not in metadata$origin column, please fix"))
+      }
+      
+      if (length(tmp$sample.id) >= 1){
+        print(glue("Applying control.id={control_id} from sequencing.run={control_id_seq_run} to element={applies_to} in {length(tmp$sample.id)} samples"), "\n")
+        clean.otu.df[,tmp$sample.id] <- clean.otu.df[,tmp$sample.id] - sum_rows(features[,c(control_id)])*importance_multiplier      
+      } else {
+        warning(glue("WARNING: Control control.id={control_id} from sequencing.run={control_id_seq_run} cant be applied to element={applies_to}, no samples match ({length(tmp$sample.id)} samples)\nThis in unexpected, every control should apply to at least one sample! Check metadata?"))
+      }
+    }
+  }
+  
+  # Negative numbers to 0
+  clean.otu.df[clean.otu.df<0] <- 0
+  
+  return(clean.otu.df)
+}
+
+clean.otu.df <- substract_control(otu_df, metadata)
+
+```
+
+# Create phyloseq object
+
+The phyloseq object can finally be created:
+
+```{r}
+# ---- Phyloseq object ----
+OTU = otu_table(clean.otu.df, taxa_are_rows = TRUE)
+TAX = tax_table(taxmat)
+SAM = sample_data(metadata)
+
+physeq = phyloseq(OTU, TAX, SAM)
+physeq
+```
+
+## Remove typical contamination by name
+
+Additionally, we remove possible contaminant ASVs using their genus and known contaminants from the input "contamination_file":
+
+```{r}
+# ---- Apply simple contamination filter using genus ----
+pop_taxa = function(ps, bad_asvs){
+  all_asvs = taxa_names(ps)
+  keep_these <- all_asvs[!(all_asvs %in% bad_asvs)]
+  return(prune_taxa(keep_these, ps))
+}
+# Only bacteria
+bad_asvs <- taxa_names(subset_taxa(tax_table(physeq), Domain!="d__Bacteria"))
+physeq <- pop_taxa(physeq, bad_asvs)
+
+# Remove typical contamination
+typical_contamination <- read.csv(contamination_file, sep='\t')
+typical_contamination$Genus <- paste("g__", typical_contamination$Genus, sep="")
+
+cont_genus <- c(typical_contamination$Genus, paste(typical_contamination$Genus, "NA", sep= "_"))
+physeq <- subset_taxa(physeq, !Genus %in% cont_genus)
+
+# Manual names
+bad_asvs <- taxa_names(
+  subset_taxa(
+    tax_table(physeq), 
+    Family %in% c("f__Dermacoccaceae",
+                  "f__Mitochondria",
+                  "f__Chloroplast",
+                  "g__Burkholderia-Caballeronia-Paraburkholderia"
+                  )
+  )
+)
+physeq <- pop_taxa(physeq, bad_asvs)
+
+# Keep ASVs with more than one count
+physeq <- prune_taxa(taxa_sums(physeq) > 1, physeq) 
+
+# Show change
+physeq
+```
+# Proportions and barplots
+
+Relative abundance can now be calculated.
+
+## Some functions
+
+First we describe the functions that will be used in these steps:
+
+```{r}
+##############################################################################
+# ------ Abundance+Prevalence filters and relative abundance functions ----- #
+##############################################################################
+
+get.otus.to.keep.by.prevalence <- function(group, data, abundance_threshold, prevalence_threshold){
+  starting.otus.count <- length(unique(data$OTU))
+  
+  print(glue("\nFiltering group composed of: '{paste(group, collapse='; ')}'"))
+  
+  # For each sample, filter to OTUs that have a relative abundance over N% 
+  # and appear in at least M% of the other samples in its group
+  abundance_over_list <- list()
+  abundance_under_list <- list()
+  for (sample_id in group){
+    # For each sample.id in group
+    # Calculate relative abundance for the sample.id's data
+    # Get OTUs over threshold into a list
+    df <- subset(data, sample.id==sample_id)
+    df$relative_abundance <- df$Abundance/sum(df$Abundance)
+    otus_over_thresh <- subset(df, relative_abundance>=abundance_threshold)$OTU
+    otus_under_thresh <- subset(df, relative_abundance<abundance_threshold)$OTU
+    abundance_over_list[[sample_id]] <- otus_over_thresh
+    abundance_under_list[[sample_id]] <- otus_under_thresh
+    print(glue("Sample {sample_id} keeps {length(otus_over_thresh)}/{length(otus_under_thresh)+length(otus_over_thresh)} ASVs filtering by abundance={abundance_threshold}"))
+  }
+  
+  # Transform list of vectors into a presence/absence dataframe by matching ASV names
+  # leaving NAs if a sample does not have the ASV.
+  # Each row is an ASV, each column is a sample
+  # Example:
+  #                             ccr11-1s                       CCR-59-1-s                       CCR-57-1-s
+  # 1   101637aba474a6614786486ad42acb11 101637aba474a6614786486ad42acb11 101637aba474a6614786486ad42acb11
+  # 2   00a2f7e2564becc62e71c46821779802                             <NA>                             <NA>
+  # 3   f7cf33648c7d6bda19e991b97583cdab f7cf33648c7d6bda19e991b97583cdab f7cf33648c7d6bda19e991b97583cdab
+  # 21  0a49a32752b611a144ddd506a2155134                             <NA> 0a49a32752b611a144ddd506a2155134
+  # 22  5258515ff2816e94d24b2bd02f8ae803                             <NA> 5258515ff2816e94d24b2bd02f8ae803
+  # 23  c773422b3dd3b7f057a6ec0d5fb93733 c773422b3dd3b7f057a6ec0d5fb93733                             <NA>
+  otu_presence <- abundance_over_list %>%
+    map(~ data.frame(col = ., ., stringsAsFactors = FALSE)) %>%
+    reduce(full_join, by = "col") %>%
+    select(-col) %>%
+    setNames(names(abundance_over_list))
+
+  # Set the OTUs as row names
+  rownames(otu_presence) <- apply(otu_presence, 1, function(z) na.omit(z)[1])
+  
+  # Select which OTUs have to be kept by prevalence
+  # The ASVs that appear in at least X% of the samples (row-wise)
+  condition <- (rowSums(!is.na(otu_presence)) / dim(otu_presence)[2]) >= prevalence_threshold
+  otus_to_keep <- rownames(otu_presence)[condition]
+  otus_to_loose_by_prevalence <- rownames(otu_presence)[!condition]
+  print(glue("Surviving ASVs to abundance filter kept by prevalence: {length(otus_to_keep)}/{length(otus_to_loose_by_prevalence)+length(otus_to_keep)}"))
+  
+  print(glue("Final: {length(otus_to_keep)}/{starting.otus.count} ASVs have passed the abundance+prevalence filter."))
+  return(
+    list(otus_to_keep=otus_to_keep, otus_to_loose_by_prevalence=otus_to_loose_by_prevalence, 
+         abundance_over_list=abundance_over_list, abundance_under_list=abundance_under_list
+         )
+    )
+}
+
+group_otus <- function(physeq_long, variables_of_interest, elements_to_target){
+  # Group OTUs by ID, variables_of_interest, subject and elements_to_target in case 
+  # there are repeated OTUs
+  tmp_cols <- c("OTU", variables_of_interest, "subject", elements_to_target)
+  before_grouping_count <- dim(physeq_long)
+  physeq_long <- physeq_long %>%  
+    dplyr::group_by(across(all_of(tmp_cols))) %>% 
+    dplyr::summarise(
+      Abundance = sum(Abundance), # sum the abundances in the group
+      n = n() # how many rows existed in the group (Important for testing)
+    )
+  after_grouping_count <- dim(physeq_long)
+  print(glue("Reduction of data rows from {before_grouping_count[1]} to {after_grouping_count[1]} by grouping with --> {paste(tmp_cols, collapse='; ')}"))
+  
+  return(physeq_long)
+}
+
+calculate_props <- function(physeq_long, variables_of_interest, target_level, threshold){
+  # ------------------------------------- #
+  # Calculate relative abundance per group
+  # - physeq_long is expected to be a grouped dplyr dataframe
+  # ------------------------------------- #
+  
+  # Replace .*__ with an emtpy string in target column
+  physeq_long[[target_level]] <- gsub(".*__", '', physeq_long[[target_level]])
+  
+  # Convert to data.table
+  physeq_long <- data.table(physeq_long)
+  
+  # Group by OTU, target_level, Type and Site
+  grouped_df <- physeq_long[, mean(Abundance), by = c('OTU', target_level, variables_of_interest)]
+  colnames(grouped_df) <- c('OTU', target_level, variables_of_interest, 'Abundance')
+  
+  # Relative abundance
+  grouped_df$relative_abundance <- grouped_df$Abundance/sum(grouped_df$Abundance)
+  
+  # Reorder by abundance
+  grouped_df <- grouped_df[order(grouped_df[,'relative_abundance'], decreasing=TRUE),]
+  
+  # Merge rows under a certain abundance threshold to "other"
+  under_thresh_df <- grouped_df[grouped_df$relative_abundance < threshold,]
+  over_thresh_df <- grouped_df[grouped_df$relative_abundance >= threshold,]
+  
+  # WARNING: expects only two variables of interest ("var1" and "var2")
+  under_thresh_df <- data.frame(t(c('__OTHER__', '__Other__', "var1", "var2", sum(under_thresh_df$relative_abundance), sum(under_thresh_df$Abundance)))) # FIXME: error here if using timeline
+  names(under_thresh_df) <- c('OTU', target_level, variables_of_interest, 'relative_abundance', "Abundance")
+  
+  final_df <- rbind(over_thresh_df, under_thresh_df)
+  final_df$relative_abundance <- as.numeric(final_df$relative_abundance)
+  final_df$Abundance <- as.numeric(final_df$Abundance)
+  
+  # Select columns (return value cannot include grouping variables in group_modify)
+  return(data.frame(final_df)[,c("OTU", target_level, 'relative_abundance', "Abundance")])
+}
+
+physeq_proccessing <- function(physeq_obj, target_level, elements_to_target, filter_abundance_threshold, 
+         prevalence_threshold, plot_abundance_threshold, metadata, out_folder, variables_of_interest){
+  # - Debug -
+  # physeq_obj = physeq
+  # target_level = "Genus"
+  # elements_to_target = c("Domain","Phylum", "Class", "Order", "Family", "Genus")
+  # filter_abundance_threshold = 0.0001
+  # prevalence_threshold = 0.3
+  # plot_abundance_threshold = 0.0001
+  # metadata = metadata
+  # out_folder = ""
+  # variables_of_interest = variables_of_interest
+  
+  # Check
+  if (plot_abundance_threshold<filter_abundance_threshold){
+    stop("Plot abundance threshold can not be lower than the abundance threshold. It could lead to bad interpretation of the results. Stopping...")
+  }
+  asv_count_per_step <- list()
+  
+  # Melt physeq
+  print(glue("Melting phyloseq object to long format..."))
+  data_phylo_long <- physeq_obj %>%
+    tax_glom(taxrank = target_level, bad_empty = c()) %>%   # Aglomerar a un rango taxonómico
+    psmelt()                                                # Cambiar a formato "long"
+  asv_count_per_step[["starting_point"]] = dim(data_phylo_long)[1]
+  
+  #####################
+  # ---- Filters ---- #
+  #####################
+  # ---- Filter by abundance and prevalence ----
+  # Filter to OTUs that have a relative abundance over N% 
+  # and appear in at least M% of the group's samples
+  print(glue("Prevalence and abundance based filtering..."))
+  
+  tmp <- subset(metadata, sample.type!="control") %>%
+    group_by(across(c(variables_of_interest))) %>%
+    group_split()
+
+  groups <- lapply(tmp, function(x){x$sample.id})
+  for (group in groups){
+    cat("Group:", group, "\n")
+    # Get OTUs to keep by prevalence
+    tmp_res <- get.otus.to.keep.by.prevalence(group, data_phylo_long, filter_abundance_threshold, prevalence_threshold)
+    otus_to_keep <- tmp_res$otus_to_keep
+
+    # Remove
+    data_phylo_long <- data_phylo_long %>% filter(!(sample.id %in% group & !OTU %in% otus_to_keep))
+    cat("\n")
+  }
+  asv_count_per_step[["abundance_and_prevalence"]] = dim(data_phylo_long)[1]
+  
+  # ---- Grouping same OTUs ----
+  print(glue("Group OTUs by ID and variables of interest and sum abundance..."))
+  data_phylo_long <- group_otus(data_phylo_long, variables_of_interest, elements_to_target)
+  asv_count_per_step[["group_by_asv"]] = dim(data_phylo_long)[1]
+  
+  ###################################
+  # ---- Calculate proportions ---- #
+  ###################################
+  
+  # ---- Proportions for each group ----
+  print(glue("Calculate relative abundance by group..."))
+  proportions_per_group <- data_phylo_long %>%  
+    dplyr::group_by(across(all_of(variables_of_interest))) %>%
+    dplyr::group_modify(~calculate_props(.x, variables_of_interest, target_level, plot_abundance_threshold), .keep=TRUE)
+  
+  # Remove empty classes
+  proportions_per_group <- subset(proportions_per_group, Abundance != 0)
+  asv_count_per_step[["final_proportions"]] = dim(data_phylo_long)[1]
+  
+  # Save tables
+  print(glue("Saving tables..."))
+  
+  # Write data per group
+  tmp <- data.frame(proportions_per_group)
+  for (s in unique(tmp$sample.type)){
+    for (o in unique(tmp$origin)){
+      tmp2_sub <- subset(tmp, sample.type==s & origin==o)
+      if (dim(tmp2_sub)[1]>=1){ # if dataframe contains any data --> save
+        file_name <- glue("{out_folder}/{s}__{o}.tsv")
+        print(glue("Saving to {file_name}..."))
+        write.table(
+          subset(tmp, sample.type==s & origin==o), file = file_name, row.names = FALSE, sep = "\t"
+        )
+      }
+    }
+  }
+  # Write cleaned long data
+  write.table(data_phylo_long, file = glue("{out_folder}/cleaned_long.tsv"), row.names = FALSE, sep = "\t")
+  
+  # Write count log
+  count_log <- as.data.frame(asv_count_per_step)
+  count_log$filter_abundance_threshold <- filter_abundance_threshold
+  count_log$prevalence_threshold <- prevalence_threshold
+  count_log$plot_abundance_threshold <- plot_abundance_threshold
+  write.table(count_log, file = glue("{out_folder}/count_log.tsv"), row.names = FALSE, sep = "\t")
+  
+  return(list(proportions=proportions_per_group, cleaned_long_data=data_phylo_long))
+}
+
+
+###################################
+# ------- Barplot function ------ #
+###################################
+get_barplots <- function(proportions, target_level, y="relative_abundance", title="", column_order=NULL){
+  # Colors
+  color <- grDevices::colors()[grep('gr(a|e)y', grDevices::colors(), invert = T)] # Creando vector de colores contrastantes
+  phylum_colors <- distinctColorPalette(length(levels(as.factor(proportions[[target_level]]))))
+  
+  # Change color of __Other__ to black
+  others_pos <- levels(as.factor(proportions[[target_level]])) == "__Other__"
+  phylum_colors[others_pos] <- "black"
+  
+  # Split names by '_'
+  proportions[[target_level]] <- gsub("_", ' ', proportions[[target_level]])
+  
+  # Config plot
+  geom_bar_pos <- NULL
+  ylab <- NULL
+  if (y=="relative_abundance"){
+    geom_bar_pos <- "fill"
+    ylab <- "Relative Abundance (RA) %"
+  } else if (y=="Abundance"){
+    geom_bar_pos <- "stack"
+    ylab <- "Abundance"
+  }
+  
+  # Main
+  p <- ggplot(proportions, aes_string(x = "label", y = y, fill = target_level)) + 
+    geom_bar(stat = "identity", position = geom_bar_pos) + 
+    # facet_wrap(~ origin , scales="free_x") +
+    scale_fill_manual(values = phylum_colors)
+  
+  if (y=="relative_abundance"){
+    p <- p + scale_y_continuous(labels = scales::percent_format())
+  }
+  if (!is.null(column_order)){
+    p <- p + scale_x_discrete(limits = column_order)
+  }
+  
+  p <- p + guides(fill = guide_legend(reverse = TRUE, keywidth = 1, keyheight = 1)) + 
+    ylab(ylab) + ggtitle(title) + xlab("") + theme_classic() + 
+    theme(axis.title.x = element_blank(), plot.title = element_text(hjust = 0.5)) + 
+    theme(axis.text.x=element_text(angle = 90), legend.key.size = unit(0.5,"line")) +
+    guides(fill=guide_legend(ncol=1, title=target_level)) # + theme(legend.position="none")
+  
+  return(list(barplot=p))
+  
+}
+
+```
+
+## Calculate and plot
+
+Now we can calculate proportions of each sample type (e.g. faeces from patients with CRC) at each level (Family, Genus...), with specific abundance and prevalence thresholds.
+
+```{r}
+###################################
+# ----- Creating RA barplots ---- #
+###################################
+# target_level <- "Species" # Ex: "Species"
+# elements_to_target <- c("Domain","Phylum", "Class", "Order", "Family", "Genus", "Species") # Ex: c("Domain","Phylum", "Class", "Order", "Family", "Genus", "Species")
+filter_abundance_threshold <- 0.0001
+prevalence_threshold <- 0.5
+plot_abundance_threshold <- 0.03
+
+# Get proportions
+conf = list(
+  list("Genus", c("Domain","Phylum", "Class", "Order", "Family", "Genus")),
+  list("Species", c("Domain","Phylum", "Class", "Order", "Family", "Genus", "Species")),
+  list("Family", c("Domain","Phylum", "Class", "Order", "Family"))
+)
+
+result_list <- list()
+for (i in conf){
+  target_level <- i[[1]]
+  elements_to_target <- i[[2]]
+  out_folder = glue("abund-{filter_abundance_threshold}__prev-{prevalence_threshold}__plot-{plot_abundance_threshold}/{target_level}")
+  dir.create(out_folder, showWarnings = FALSE, recursive = TRUE)
+  
+  cat("\n")
+  print(glue("====== {target_level} level ======"))
+  
+  # Get proportions
+  prop <- physeq_proccessing(
+    physeq_obj=physeq, target_level=target_level,
+    elements_to_target=elements_to_target,
+    filter_abundance_threshold=filter_abundance_threshold, prevalence_threshold=prevalence_threshold,
+    plot_abundance_threshold=plot_abundance_threshold, metadata=metadata, out_folder=out_folder, variables_of_interest=variables_of_interest)
+  
+  # Create label
+  prop$proportions$label <- paste(prop$proportions$origin, prop$proportions$sample.type, sep='__')
+  
+  # Rename a tag
+  # M89-S, M89-G, M89-F, M89-FT-NC, M89-FT-Tr, M89-FT-Ac, M89-FT-NL, M89-FT-MetL
+  renaming_list <- list(
+    c("normal-mucosa__crc", 'M89-FT-NC'),
+    c("transition-mucosa__crc", 'M89-FT-Tr'),
+    c("adenocarcinoma__crc", 'M89-FT-Ac'),
+    c("metastatic-liver__crc", 'M89-FT-MetL'),
+    c("normal-liver__crc", 'M89-FT-NL'),
+    c("faeces__crc", 'M89-F'),
+    c("saliva__crc", "M89-S"),
+    c("subgingival-fluid__crc", "M89-G")
+  )
+  for (i in renaming_list){
+    prop$proportions$label <- gsub(i[1], i[2], prop$proportions$label)
+  }
+  column_order <- c("M89-S", "M89-G", "M89-F", "M89-FT-NC", "M89-FT-Tr", "M89-FT-Ac", "M89-FT-NL", "M89-FT-MetL")
+  
+  barplot <- get_barplots(
+    proportions=prop$proportions,
+    target_level=target_level,
+    title=glue("{target_level} (Abundance:{filter_abundance_threshold}, Prevalence:{prevalence_threshold}, Plot:{plot_abundance_threshold})"),
+    column_order=column_order
+    )
+
+  # Save plot
+  # htmlwidgets::saveWidget(
+  #   as_widget(ggplotly(barplot$barplot)),
+  #   glue("{out_folder}/barplot.html")
+  # )
+  
+  result_list[[target_level]] <- list(proportions=prop$proportions, barplot=barplot$barplot)
+}
+
+```
+
+```{r}
+print(result_list$Family$barplot)
+print(result_list$Genus$barplot)
+print(result_list$Species$barplot)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Save images
+tiff(paste("parvimonas_16S_89_t", plot_abundance_threshold, ".tiff", sep=''), width=15,height=15, units = 'in', res = 300)
+ggarrange(result_list$Family$barplot, result_list$Genus$barplot, result_list$Species$barplot, ncol = 2)
+dev.off()
+```
+
+## Venn diagram
+
+Venn diagrams are calculated using other abundance and prevalence thresholds in order to check the shared genus between subgingival-fluid and adenocarcinoma tissue.
+
+```{r message=FALSE}
+filter_abundance_threshold <- 0.0001
+prevalence_threshold <- 0.5
+plot_abundance_threshold <- 0.0001
+
+target_level <- "Genus"
+elements_to_target <- c("Domain","Phylum", "Class", "Order", "Family", "Genus")
+out_folder = glue("abund-{filter_abundance_threshold}__prev-{prevalence_threshold}__plot-{plot_abundance_threshold}/{target_level}")
+dir.create(out_folder, showWarnings = FALSE, recursive = TRUE)
+
+# Get proportions
+prop <- physeq_proccessing(
+  physeq_obj=physeq, target_level=target_level,
+  elements_to_target=elements_to_target,
+  filter_abundance_threshold=filter_abundance_threshold, prevalence_threshold=prevalence_threshold,
+  plot_abundance_threshold=plot_abundance_threshold, metadata=metadata, out_folder=out_folder, variables_of_interest=variables_of_interest)
+
+# Create label
+prop$proportions$label <- paste(prop$proportions$origin, prop$proportions$sample.type, sep='__')
+
+# Rename a tag
+# M89-S, M89-G, M89-F, M89-FT-NC, M89-FT-Tr, M89-FT-Ac, M89-FT-NL, M89-FT-MetL
+renaming_list <- list(
+  c("normal-mucosa__crc", 'M89-FT-NC'),
+  c("transition-mucosa__crc", 'M89-FT-Tr'),
+  c("adenocarcinoma__crc", 'M89-FT-Ac'),
+  c("metastatic-liver__crc", 'M89-FT-MetL'),
+  c("normal-liver__crc", 'M89-FT-NL'),
+  c("faeces__crc", 'M89-F'),
+  c("saliva__crc", "M89-S"),
+  c("subgingival-fluid__crc", "M89-G")
+)
+for (i in renaming_list){
+  prop$proportions$label <- gsub(i[1], i[2], prop$proportions$label)
+}
+column_order <- c("M89-S", "M89-G", "M89-F", "M89-FT-NC", "M89-FT-Tr", "M89-FT-Ac", "M89-FT-NL", "M89-FT-MetL")
+
+barplot <- get_barplots(
+  proportions=prop$proportions,
+  target_level=target_level,
+  title=glue("{target_level} (Abundance:{filter_abundance_threshold}, Prevalence:{prevalence_threshold}, Plot:{plot_abundance_threshold})"),
+  column_order=column_order
+  )
+
+ggplotly(barplot$barplot)
+```
+
+The following genus are shared in between subgingival-fluid and adenocarcinoma in patient 89:
+```{r}
+genus.subgingival <- subset(prop$proportions, origin=="subgingival-fluid")[["Genus"]]
+genus.adenocarcinome <- subset(prop$proportion, origin=="adenocarcinoma")[["Genus"]]
+intersect(genus.subgingival, genus.adenocarcinome)
+```
+Saving the Venn diagram:
+```{r}
+venn.diagram(
+  x = list(genus.subgingival, genus.adenocarcinome),
+  category.names = c("Oral CCR" , "Tumor CCR" ),
+  filename = paste('venn__',target_level, '_gingival_vs_adenocarcinoma.tiff', sep=''),
+  output = TRUE ,
+  imagetype="tiff" ,
+  height = 1000 ,
+  width = 1000 ,
+  resolution = 300,
+  compression = "lzw",
+  lwd = 1,
+  col=c("#440154ff", '#21908dff'),
+  fill = c(alpha("#440154ff",0.3), alpha('#21908dff',0.3)),
+  cex = 1,
+  fontfamily = "sans",
+  cat.cex = 1,
+  cat.default.pos = "outer",
+  cat.pos = c(0, 0),
+  cat.dist = c(0.055, 0.055),
+  cat.fontfamily = "sans",
+  cat.col = c("#440154ff", '#21908dff')
+)
+
+```
+
+# Session info
+
+Session info, including used packages, is available here:
+
+```{r}
+sessionInfo()
+```
+
+

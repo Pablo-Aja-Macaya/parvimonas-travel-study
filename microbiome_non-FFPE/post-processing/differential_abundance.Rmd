@@ -1,0 +1,459 @@
+---
+title: "Differential abundance using full cohort"
+output:
+  html_document:
+    highlight: 'haddock'
+    theme: cerulean
+    df_print: paged
+    number_sections: true
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+    cache       = FALSE,     # if TRUE knitr will cache the results to reuse in future knits
+    #fig.width   = 18,       # the width for plots created by code chunk
+    #fig.height  = 8,       # the height for plots created by code chunk
+    fig.align   = 'center', # how to align graphics in the final doc. 
+    warning     = FALSE,
+    cache       = FALSE,
+    comment     = NA
+)
+# knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+```
+
+In this script we will analyze the differential abundance at genus level of the full cohort of patients (not only patient 89) in faeces samples. The objective is to check if the abundance of each genus changes depending on the patient status (crc or non-crc). The script will read various inputs, create a phyloseq object, perform cleaning on this object (using negative controls and some described contaminants in literature) and calculate differential abundance.
+
+# Libraries
+Load the neccessary libraries:
+
+```{r message=FALSE, warning=FALSE}
+library(purrr)
+library(ggplot2)
+library(dplyr)
+library(vegan)
+library("devtools")
+library(data.table)
+library(ggtree)
+library(phyloseq)
+library(plotly)
+library(VennDiagram)
+require(RColorBrewer)
+library(egg)
+library(randomcoloR)
+library(glue)
+library(ANCOMBC)
+library(DT)
+options(dplyr.summarise.inform = FALSE)
+```
+
+# Visual functions
+Load a function to show pretty tables in HTML format:
+
+```{r}
+create.table <- function(df, capt=NULL){
+  DT::datatable(df, extensions = c('FixedColumns'),
+                options = list(scrollX = TRUE, pageLength = 5), 
+                caption=htmltools::tags$caption(
+                  style = 'caption-side: bottom; text-align: center; color: black;',
+                  htmltools::em(capt)
+                ))
+}
+```
+
+# Input
+The neccessary input for the script is specified here:
+
+```{r}
+feature_table_file <- "/home/usuario/Proyectos/Results/Kelly/KellyCCR/output/qiime2/export_results/feature-table.json"
+contamination_file <- "/home/usuario/Proyectos/ParviPaper/microbiome_non-FFPE/data/contaminants.tsv"
+metadata_file <- "/home/usuario/Proyectos/ParviPaper/microbiome_non-FFPE/data/non-ffpe_metadata.tsv"
+taxmat_file <- "/home/usuario/Proyectos/Results/Kelly/KellyCCR/output/phyloseq/split_taxonomy/separated_taxonomy.tsv"
+tree_file <- "/home/usuario/Proyectos/Results/Kelly/KellyCCR/output/qiime2/export_results/tree.nwk"
+output_folder <- "/home/usuario/Proyectos/Results/Kelly/KellyCCR/output/phyloseq/proportions"
+variables_of_interest <- c("sample.type","origin")
+timeline_var <- ""
+```
+
+# Load data
+There are three parts that must be loaded for a phyloseq object, the features (ASV), metadata and taxonomy information.
+
+## Features
+Load ASVs and remove those which are empty (bad quality or a control):
+
+```{r}
+# ---- ASVs -----
+# Transform biome data to JSON.biome
+# biom convert -i in.biom -o out.json.biom --table-type="OTU table" --to-json
+otu_df <- import_biom(feature_table_file)
+
+# Eliminar muestras donde toda la columna sea 0 (no tienen datos)
+condition <- colSums(otu_df) != 0
+otu_df_empty_cols <- colnames(otu_df)[!condition]
+if (length(otu_df_empty_cols)>0){
+  print(glue("WARNING: There are {length(otu_df_empty_cols)} empty columns in ASV dataframe (no data, this can happen in controls) and they will be removed: '{paste(otu_df_empty_cols, collapse='; ')}'"))
+}
+otu_df <- otu_df[, condition]
+
+create.table(head(otu_df), "Head of feature table")
+
+```
+
+## Metadata
+
+Metadata is processed here:
+
+```{r}
+# ---- Metadata ----
+metadata <- read.delim(metadata_file, comment.char = "#")
+
+# Check if there are columns not in otu_df besides the otu_df columns that were empty
+condition <- metadata[,'sample.id'] %in% colnames(otu_df)
+sample.ids.not.in.otus <- metadata[!condition,]$sample.id
+if (length(setdiff(otu_df_empty_cols, sample.ids.not.in.otus))>0){
+  warning("There are unexpected columns in metadata that do not exist in ASV dataframe")
+}
+metadata <- metadata[condition,] # eliminar muestras si no existen en otu_df
+rownames(metadata) <- metadata[,'sample.id']
+
+# Create column for grouping by variables_of_interest
+if ("grouping_var" %in% names(metadata)){
+  stop("Ups, metadata already has grouping_var as column")
+} else {
+  metadata$grouping_var <- do.call(paste, c(metadata[variables_of_interest], sep="__"))
+}
+
+# Make categorical columns
+for (i in variables_of_interest){
+  metadata[[i]] <- factor(metadata[[i]])
+}
+
+create.table(metadata, "Metadata")
+
+```
+
+## Taxonomy
+
+The taxonomy is processed here to propagate levels (filling NAs in taxa levels with the last known level):
+
+```{r}
+# ---- Taxmat ----
+# Taxonomy must be split into columns
+taxmat = as.matrix(read.delim(taxmat_file, sep='\t'))
+
+# Propagate NAs
+keep_unidentified <- function(tx_table){
+  # Keep the ones that have one of c(NA, "", " ", "\t") in target_level column
+  # and then find the last level that is known (can be Genus, Family...)
+  # Assign to the target_level level the last known level + x__XXX NA
+  # Family (last known)   Species
+  # f__Lachnospiraceae    f__Lachnospiraceae NA
+  elements_to_target <- colnames(tx_table)
+  tx_table <- as.data.frame(tx_table)
+  previous_level <- elements_to_target[1]
+  for (level in elements_to_target[2:length(elements_to_target)]){
+    empty_values <- tx_table[[level]] %in% c(NA, "", " ", "\t")
+    tx_table[[level]][empty_values] <- paste(tx_table[[previous_level]][empty_values], "NA", sep="_")
+    tx_table[[level]][empty_values] <- gsub("(_NA[> ]*)*", "\\1", tx_table[[level]][empty_values]) # Replace repetitions of NA by one NA
+    
+    previous_level <- level
+  }
+  
+  return(tx_table)
+}
+taxmat <- as.matrix(keep_unidentified(taxmat))
+
+# Set row names
+rownames(taxmat) <- rownames(otu_df)
+
+create.table(as.data.frame(head(taxmat)), "Head of taxonomy table")
+```
+
+
+# Apply controls
+
+Substract controls specified in metadata, in order to reduce possible PCR contaminations:
+
+```{r}
+# Calcular la suma de cada ASV en los controles
+sum_rows <- function(input){
+  # Si el input es dataframe hacer rowSums para obtener un vector
+  # Si ya es un vector devolverlo
+  if (is.null(ncol(input))){
+    return (input)
+  } else {
+    return (rowSums(input))
+  }
+}
+
+substract_control <- function(features, metadata, importance_multiplier=1){
+  # Substract ASVs that appear in controls per sequencing-run
+  # - features: ASV table
+  # - metadata: dataframe with metadata
+  # - importance_multiplier: increase this to a big number to fully remove ASVs that appear in controls (like 999999)
+  cat("\nUsing controls for cleaning...\n")
+  
+  # Initialize clean dataframe with non-control ids
+  clean.otu.df <- features[, subset(metadata, sample.type!="control")$sample.id]
+  
+  # Split "control.applies.to.origin" column by ";"
+  # The resulting elements will be searched in "origin" column 
+  # and the control will be applied to corresponding samples
+  metadata$control.applies.to_split <- strsplit(metadata$control.applies.to.origin, ";")
+  
+  # For each control ID
+  for (control_id in subset(metadata, sample.type=="control")$sample.id ){
+    # Get the metadata of the control ID
+    r <- subset(metadata, sample.id==control_id)
+    
+    # Log
+    control_id_seq_run = r$sequencing.run
+    print(glue("\n==== Using sample.id '{control_id}' as control in sequencing.run='{control_id_seq_run}' ===="))
+    
+    # Check that if element "all" is present no other elements exist
+    # and that an element is not repeated with unique
+    applies_to_elements <- unique(r$control.applies.to_split[[1]]) # To access split elements: metadata$control.applies.to_split[65][[1]][1]
+    if ("all" %in% applies_to_elements & length(applies_to_elements)>1){
+      stop("Element 'all' was specified, but extra elements are present. Please choose either 'all' or the other elements")
+    }
+    
+    # For each origin to which the control applies to
+    for (applies_to in applies_to_elements){ 
+      print(glue("\n~~~ Applying control to: '{applies_to}' ~~~"))
+      
+      tmp <- subset(metadata, sample.type!="control" & sequencing.run==control_id_seq_run)
+      
+      # If the control applies to all samples
+      if (applies_to == "all"){
+        tmp <- tmp
+        # If it only applies to a certain origin type which IS in metadata$origin
+      } else if (applies_to %in% metadata$origin){
+        tmp <- subset(tmp, origin==applies_to)
+        # If it is not "all" or the element doesnt exist in metadata$origin, raise error 
+      } else {
+        warning(glue("Origin '{applies_to}' is not in metadata$origin column, please fix"))
+      }
+      
+      if (length(tmp$sample.id) >= 1){
+        print(glue("Applying control.id={control_id} from sequencing.run={control_id_seq_run} to element={applies_to} in {length(tmp$sample.id)} samples"), "\n")
+        clean.otu.df[,tmp$sample.id] <- clean.otu.df[,tmp$sample.id] - sum_rows(features[,c(control_id)])*importance_multiplier     
+      } else {
+        warning(glue("ERROR: Control control.id={control_id} from sequencing.run={control_id_seq_run} cant be applied to element={applies_to}, no samples match ({length(tmp$sample.id)} samples)\nThis in unexpected, every control should apply to at least one sample! Check metadata? Stopping..."))
+      }
+    }
+  }
+  
+  # Negative numbers to 0
+  clean.otu.df[clean.otu.df<0] <- 0
+  
+  return(clean.otu.df)
+}
+
+clean.otu.df <- substract_control(otu_df, metadata)
+
+```
+
+# Create phyloseq object
+The phyloseq object can finally be created:
+
+```{r}
+# ---- Phyloseq object ----
+OTU = otu_table(clean.otu.df, taxa_are_rows = TRUE)
+TAX = tax_table(taxmat)
+SAM = sample_data(metadata)
+TREE = read_tree(tree_file)
+
+physeq = phyloseq(OTU, TAX, SAM, TREE)
+physeq
+```
+
+## Remove typical contamination by name
+
+Additionally, we remove possible contaminant ASVs using their genus and known contaminants from the input "contamination_file":
+
+```{r}
+# ---- Apply simple contamination filter using genus ----
+pop_taxa = function(ps, bad_asvs){
+  all_asvs = taxa_names(ps)
+  keep_these <- all_asvs[!(all_asvs %in% bad_asvs)]
+  return(prune_taxa(keep_these, ps))
+}
+# Only bacteria
+bad_asvs <- taxa_names(subset_taxa(tax_table(physeq), Domain!="d__Bacteria"))
+physeq <- pop_taxa(physeq, bad_asvs)
+
+# Remove typical contamination
+typical_contamination <- read.csv(contamination_file, sep='\t')
+typical_contamination$Genus <- paste("g__", typical_contamination$Genus, sep="")
+
+cont_genus <- c(typical_contamination$Genus, paste(typical_contamination$Genus, "NA", sep= "_"))
+physeq <- subset_taxa(physeq, !Genus %in% cont_genus)
+
+# Manual names
+bad_asvs <- taxa_names(
+  subset_taxa(
+    tax_table(physeq), 
+    Family %in% c("f__Dermacoccaceae",
+                  "f__Mitochondria",
+                  "f__Chloroplast",
+                  "g__Burkholderia-Caballeronia-Paraburkholderia"
+                  )
+  )
+)
+physeq <- pop_taxa(physeq, bad_asvs)
+
+# Keep ASVs with more than one count
+physeq <- prune_taxa(taxa_sums(physeq) > 1, physeq) 
+
+# Show change
+physeq
+```
+
+## Extra
+```{r}
+# Remove samples with sample-type=="others" (they were not crc nor no-crc)
+physeq <- subset_samples(physeq, sample.type != "others")
+metadata <- data.frame(sample_data(physeq))
+physeq
+```
+
+# Differential abundance
+
+In order to calculate differential abundance we will use ANCOM-BC on the filtered phyloseq object, comparing faeces samples between crc and non-crc patients.
+
+## Filter data
+Filter the data to the specified categories and group into biosamples:
+
+```{r}
+# - Use original physeq object without prevalence/abundance filters
+#   (but controls applied and contamination removed)
+# - Select faeces samples for comparison
+ps <- subset_samples(physeq, 
+              sample.type %in% c("crc","non-crc") & 
+              origin %in% c("faeces") 
+              
+)
+
+# Group by sample.type, origin and subject
+sample_data(ps)$group <- mapply(
+  paste0, 
+  as.character(get_variable(ps, "sample.type")), 
+  as.character(get_variable(ps, "origin")), 
+  as.character(get_variable(ps, "subject")), 
+  collapse = "_"
+)
+ps <- phyloseq::merge_samples(ps, "group", fun=median)
+
+ps
+```
+
+## Run ANCOM-BC
+Run ANCOM-BC to calculate genus with a significantly different abundance between the sample groups:
+
+```{r message=FALSE, warning=FALSE}
+# IMPORTANT: ANCOM-BC v2.0.1 was used. Its output format varies depending on version
+set.seed(123)
+out <- ancombc(data=ps, tax_level="Genus", prv_cut=0.1, 
+               formula = "sample.type", n_cl=10,
+               p_adj_method="holm", alpha = 0.05)
+```
+
+## Process results
+Once ANCOM-BC is finished, we process the results into a more readable format and make a barplot with the significant genus.
+
+```{r}
+# Get results
+res = out$res
+
+# Rename columns (WARNING: only appropiate for one to one comparisons)
+names(res$lfc) <- c("taxon_id","lfc_intercept", "lfc")
+names(res$diff_abn) <- c("taxon_id", "diff_abn_intercept", "diff_abn")
+names(res$se) <- c("taxon_id","se_intercept", "se")
+names(res$q_val) <- c("taxon_id","qval_intercept", "qval")
+
+# Merge results into one dataframe by taxon_id
+merged <- Reduce(function(x, y) merge(x, y, by.x="taxon_id", by.y="taxon_id"), 
+                 list(res$lfc, res$diff_abn, res$se, res$q_val))
+merged <- merged[,c("taxon_id","lfc","diff_abn","se","qval")]
+
+create.table(merged[order(merged$qval),], "ANCOM-BC results")
+```
+
+
+```{r}
+# Select the significant ones
+merged <- subset(merged, diff_abn==TRUE)
+
+# Remove g__Incertae_Sedis genus as it can not be trusted
+merged <- subset(merged, taxon_id!="g__Incertae_Sedis")
+
+# Format taxon_id to remove things like "g__"
+merged$taxon_id <- gsub(".*__", '', merged$taxon_id)
+
+# Invert orientation so lfc for crc is on top (just visual change)
+merged$lfc <- merged$lfc*-1
+
+# Format results for plotting
+df_fig <- merged %>% 
+  dplyr::arrange(desc(lfc)) %>%
+  dplyr::mutate(direct = ifelse(lfc > 0, "Positive LFC", "Negative LFC"))
+df_fig$taxon_id <- factor(df_fig$taxon_id, levels = df_fig$taxon_id)
+df_fig$direct <- factor(df_fig$direct, levels = c("Positive LFC", "Negative LFC"))
+
+# Significance label
+# - Corrected p-value (qval) under 0.001 will have "***"
+# - Corrected p-value (qval) under 0.01 will have "**"
+# - Corrected p-value (qval) under 0.05 will have "*"
+df_fig$qval.txt <- cut(df_fig$qval, c(-Inf,0.001,0.01,0.05,Inf), labels=c('***','**','*','-'))
+
+# Orientation for significance level
+df_fig$orientation <- 0
+df_fig$orientation[df_fig$lfc > 0] <- 1
+df_fig$orientation[df_fig$lfc < 0] <- -1
+
+```
+
+These are the formatted results, with qval being the corrected p-value:
+```{r}
+create.table(df_fig, "Formatted ANCOM-BC results")
+```
+
+## Plot
+Visualize results using the log fold change of each genus:
+```{r}
+# Plot
+p <- ggplot(data = df_fig, 
+               aes(x = taxon_id, y = lfc)) + 
+  geom_bar(stat = "identity", width = 0.7, 
+           position = position_dodge(width = 0.4), fill="gray", color="gray36") +
+  geom_errorbar(aes(ymin = lfc - se, ymax = lfc + se), 
+                width = 0.2, position = position_dodge(0.05), color = "gray36") + 
+  geom_text(aes(label = qval.txt, y=lfc+orientation*(se+0.05)), color = "gray36") +
+  labs(x = NULL, y = "Log fold change", title = "") + 
+  scale_fill_discrete(name = NULL) +
+  scale_color_discrete(name = NULL) +
+  scale_x_discrete(limits = df_fig$taxon_id) +
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.minor.y = element_blank(),
+        axis.title = element_text(color = "black", size = 12),
+        axis.text.x = element_text(angle = 0, color = "black", face = "italic"),
+        axis.text = element_text(size = 12))
+ggplotly(p)
+
+```
+
+```{r}
+ggsave("log_fold_change.png", plot=p, width=2000, height=2000, units="px", dpi = "retina")
+```
+
+# Session info
+
+Session info, including used packages, is available here:
+
+```{r}
+sessionInfo()
+```
+
+
