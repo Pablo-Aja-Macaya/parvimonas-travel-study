@@ -9,13 +9,14 @@
     - [R Libraries Installation Instructions](#r-libraries-installation-instructions)
 
 ## Requirements
-Each step will have different requirements, but a base Conda environment, (where QIIME2 is installed), will be used to run the scripts. To go quicker access to installation instructions sections:
- - [Initialize Conda](#install-conda)
+In this project, there will be required to install a base Conda environment (where another necessary tools will be installed) as well as an R interpreter to run the scripts. The table below shows the shortcuts to the sections with the guidelines for installing/running the scripts/tools:
+
+ - [Initialize Conda](#initialize-conda)
  - [Create and install QIIME2 environment](#create-and-install-qiime2-environment)
  - [Install Sidle](#install-sidle)
 
 ### Initialize Conda:
-To inicialize Conda environment (it should be included inside bash script, after the bash header):
+To use Conda environment, it is mandatory inicialize in terminal command-line or inside bash script (in the last case, after the bash header): 
 
 ```sh
 #!/bin/bash
@@ -23,14 +24,19 @@ conda init bash
 conda activate <insert-conda-environment-name>
 ```
 
-### Create and install QIIME2 environment (also available at `microbiome-FFPE/qiime2/envs/qiime2.yml`):
+### Create and install QIIME2 environment 
+
 ```sh
 # Download .yml file
 wget https://data.qiime2.org/distro/core/qiime2-2021.4-py38-linux-conda.yml
 conda env create -n qiime2-2021.4 --file qiime2-2021.4-py38-linux-conda.yml
 rm qiime2-2021.4-py38-linux-conda.yml # OPTIONAL CLEANUP
 ```
-[In case of complications with conda or qiime2 version installation, go to](https://docs.qiime2.org/2021.4/install/native/)
+NOTE: 
+- Also, an available file with environment plugins and packages configuration can be found at `microbiome-FFPE/qiime2/envs/qiime2.yml`).
+
+
+[In case of complications during Conda or QIIME2 version installation, go to](https://docs.qiime2.org/2021.4/install/native/)
 
 ### Install Sidle
 Sidle can be installed after activate your conda environment as explained previously.
@@ -46,27 +52,38 @@ pip install git+https://github.com/bokulich-lab/RESCRIPt.git
 pip install git+https://github.com/jwdebelius/q2-sidle
 qiime dev refresh-cache
 ```
-Another way to install Rescript is explained at microbiome_non-FFPE/README.rmd.
-
-
+NOTE: 
+- Another way to install Rescript is explained at microbiome_non-FFPE/README.rmd.
+- We have used a Conda environment, but another environments, as mamba, can be used.
 
 ## Download reads and metadata
 
 Download reads from bioproject **PRJNA911189**. Metadata can be downloaded either from the bioproject (Using both biosample and SRA metadata), but is also available in this repository at `microbiome_FFPE/data/ffpe_metadata.tsv`.
 
-Either way, the expected metadata for the following scripts consists in a .tsv file with the columns SampleID, id_tissue, subject_type, CCRbiome, location_en, histologic_grade_en, tnm_staging, sample_nature, sequencing_run and  control_applies_to. Where id_tissue_sp specify the type of sample (tumor, adenoma, normal, liver-met or liver-healthy). 
-As for the columns subject_type is the subject classification (ccr or control), CCRbiome gets the subject id code without the sample type as well as location, histological_grade and tnm_staging shows the sample location, the histological grade and the tnm_staging.
-Finally,the columns sample_nature, control_id_seq_run and control_applies_to are related to sample classification (ffpe or control), to sequencing run code and negative control identification ("control-applies-to*" will be used to remove contamination of specific samples/tissues in their respective sequencing runs), respectively.
+Either way, the expected metadata for the following scripts consists in a .tsv file with the columns SampleID, id_tissue, subject_type, CCRbiome, location_en, histologic_grade_en, tnm_staging, sample_nature, sequencing_run and  control_applies_to. 
+- `Metadata Columns`:
+    - `SampleID`: Sample identification code.
+    - `id_tissue`: Type of sample (tumor, adenoma, normal, liver-met or liver-healthy). 
+    - `subject_type`: The subject id code without the tissue type (CCR89).
+    - `subject`: The sample classification (ccr or control).
+    - `CCRbiome`: The number associated to the subject_type code.
+    - `Location`: Sample location inside gastrointestinal system. 
+    - `Histological_grade`: A system to classify the differences between cancerous cells apearance.
+    - `tnm_staging`: One of the systems used to stage bowel (colon and rectal) cancer (informs about the tumor size as well as how far it has spread).
+    - `sample_nature`: Sample classification (ffpe or control). This will let to difference between samples types (ffpe or not ffpe in metadata with more patients).
+    - `sequecing_run`: sequencing run id code (it will be used to remove negative controls contaminants from those samples with which they share sequencing run id). 
+    - `control_applies_to`: 
+
 
 ## QIIME2 processing
 
+The full QIIME2 workflow code can be found at the file pipeline_FFPE_Samples__QIIME2_Conda.sh, located at `microbiome_FFPE/qiime2/` path. Inside it, there would be a preprocessing before using the sidle plugin (a great tool to work with problematics samples as paraffined ones). 
+
 ### Sidle tool
 Paraffined samples has been analyzed with SMURF (Short MUltiple Regions Framework) python implementation in QIIME2 Framework, called q2-sidle. This software combines sequencing results of any number of amplified 16S rRNA regions to obtain a reliable microbial profiling. [To know more, go to](https://q2-sidle.readthedocs.io/en/latest/index.html).
-
-A bash script is located at `microbiome_FFPE/qiime2/<insert-bash-script-name>.sh`.    
     
 ### Output Files: 
-When it is done multiple outputs will be available, which will be the ones used in:
+When it is done multiple output files will be available (but we must know that some outputs files turn into as input files in another steps of the pipeline). The following schema is a brief outline of all the files obtained during the execution of the pipeline:
 
 [Sidle tool](#sidle-tool)
 - `regional-databases`:
@@ -101,11 +118,12 @@ NOTES:
 
 It is optional to export results to biom or tsv format. In this case, we used a R library, QIIME2R, which let to import .qza files without exported it to other formats. But, another option is export from qza format to tsv or biom and run the rmarkdown file. To see how rmarkdown would look like, go to `microbiome_non-FFPE/post-processing/ccr89.Rmd` and check until control contaminants removing. The above section will not change. 
 
+NOTE: During the pipeline_FFPE_Samples__QIIME2_Conda.sh, there are database files required throughout the full pipeline. The sidle documentation page indicates how to prepare the chosen database (SILVA, GreenGenes, etc) to the different regions of the study samples.
     
 ## Post-processing
 ### Relative abundance in patient 89
-A rmarkdown, located at `microbiome_non-FFPE/post-processing/CCR89_FFPE_Replicates.Rmd`, can be executed to obtain the data results shows in html format.
-We have used Rstudio to run R scripts, but there are another environments used, as mamba.(See Readme available at `microbiome_non-FFPE/README.rmd`). 
+A rmarkdown file, located at `microbiome_non-FFPE/post-processing/CCR89_FFPE_Replicates.Rmd`, can be executed to obtain the data results shows in html format.
+We have used Rstudio to run R scripts.(See Readme available at `microbiome_non-FFPE/README.rmd`). 
 Note: For results replication purpose, the metadata used in the rmarkdown file should be the one called metadataccr89_FFPE.tsv. This one is a simplification of the metadata called ffpe_metadata.tsv (both of them are located at: `microbiome_FFPE/data/`)
 
 ### R Libraries Installation Instructions    
