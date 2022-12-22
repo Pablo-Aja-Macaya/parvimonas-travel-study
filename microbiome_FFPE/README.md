@@ -53,7 +53,7 @@ pip install git+https://github.com/jwdebelius/q2-sidle
 qiime dev refresh-cache
 ```
 NOTE: 
-- Another way to install Rescript is explained at microbiome_non-FFPE/README.rmd.
+- Another way to install Rescript is explained at `microbiome_non-FFPE/README.rmd`.
 - We have used a Conda environment, but another environments, as mamba, can be used.
 
 ## Download reads and metadata
